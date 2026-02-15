@@ -1,4 +1,4 @@
-# Mission Control Docs
+# Mission Control docs
 
 This folder is the documentation home for **OpenClaw Mission Control**.
 
