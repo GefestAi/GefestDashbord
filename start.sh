@@ -95,10 +95,6 @@ check_dependencies() {
         exit 1
     fi
     
-    if ! command -v psql &> /dev/null; then
-        error "PostgreSQL не установлен"
-        exit 1
-    fi
 }
 
 # Настройка .env файлов
@@ -172,63 +168,71 @@ setup_env_files() {
     if ! grep -q "^CORS_ORIGINS=.*localhost:3000" "$SCRIPT_DIR/backend/.env"; then
         sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000|" "$SCRIPT_DIR/backend/.env"
     fi
+
+    # Устанавливаем DATABASE_URL из переменных окружения контейнера
+    local pg_host="${POSTGRES_HOST:-postgres}"
+    local pg_user="${POSTGRES_USER:-postgres}"
+    local pg_pass="${POSTGRES_PASSWORD:-postgres}"
+    local pg_port="${POSTGRES_PORT:-5432}"
+    local pg_db="${POSTGRES_DB:-mission_control}"
+    local db_url="postgresql+psycopg://${pg_user}:${pg_pass}@${pg_host}:${pg_port}/${pg_db}"
+    if grep -q "^DATABASE_URL=" "$SCRIPT_DIR/backend/.env"; then
+        sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${db_url}|" "$SCRIPT_DIR/backend/.env"
+    else
+        echo "DATABASE_URL=${db_url}" >> "$SCRIPT_DIR/backend/.env"
+    fi
 }
 
-# Запуск PostgreSQL
-start_postgres() {
-    info "Проверка PostgreSQL..."
-    
-    # Проверяем, запущен ли PostgreSQL
-    if systemctl is-active --quiet postgresql 2>/dev/null || systemctl is-active --quiet postgresql@16-main 2>/dev/null; then
-        info "PostgreSQL уже запущен"
-    else
-        info "Запуск PostgreSQL..."
-        if command -v systemctl &> /dev/null; then
-            sudo systemctl start postgresql || sudo systemctl start postgresql@16-main
-            sleep 2
-            info "PostgreSQL запущен"
-        else
-            error "systemctl не найден. Запустите PostgreSQL вручную"
-            exit 1
-        fi
-    fi
-    
-    # Ждём пока PostgreSQL будет готов
-    for i in {1..10}; do
-        if sudo -u postgres psql -c "SELECT 1" &> /dev/null; then
-            info "PostgreSQL готов к работе"
+# Ожидание и подготовка внешнего PostgreSQL
+wait_and_setup_postgres() {
+    local pg_host="${POSTGRES_HOST:-postgres}"
+    local pg_user="${POSTGRES_USER:-postgres}"
+    local pg_pass="${POSTGRES_PASSWORD:-postgres}"
+    local pg_port="${POSTGRES_PORT:-5432}"
+    local pg_db="${POSTGRES_DB:-mission_control}"
+
+    info "Ожидание PostgreSQL на ${pg_host}:${pg_port}..."
+
+    for i in {1..30}; do
+        if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -c "SELECT 1" &>/dev/null; then
+            info "PostgreSQL доступен"
             break
         fi
-        if [ $i -eq 10 ]; then
-            error "PostgreSQL не отвечает"
+        if [ "$i" -eq 30 ]; then
+            error "PostgreSQL не отвечает после 30 попыток"
             exit 1
         fi
-        sleep 1
+        sleep 2
     done
-    
+
     # Создаём базу данных если не существует
-    if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw mission_control; then
-        info "База данных mission_control уже существует"
+    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" \
+           -lqt | cut -d'|' -f1 | grep -qw "$pg_db"; then
+        info "База данных ${pg_db} уже существует"
     else
-        info "Создание базы данных mission_control..."
-        sudo -u postgres psql -c "CREATE DATABASE mission_control;"
+        info "Создание базы данных ${pg_db}..."
+        PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" \
+            -c "CREATE DATABASE \"${pg_db}\";"
         info "База данных создана"
     fi
-    
-    # Устанавливаем пароль для пользователя postgres если нужно
-    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';" &> /dev/null || true
 }
 
 # Проверка PostgreSQL
 check_postgres() {
-    info "Проверка подключения к PostgreSQL..."
-    
-    if ! PGPASSWORD=postgres psql -h localhost -U postgres -d mission_control -c "SELECT 1" &> /dev/null; then
-        error "Не удается подключиться к базе данных mission_control"
-        error "Убедитесь, что PostgreSQL запущен и база создана"
+    local pg_host="${POSTGRES_HOST:-postgres}"
+    local pg_user="${POSTGRES_USER:-postgres}"
+    local pg_pass="${POSTGRES_PASSWORD:-postgres}"
+    local pg_port="${POSTGRES_PORT:-5432}"
+    local pg_db="${POSTGRES_DB:-mission_control}"
+
+    info "Проверка подключения к PostgreSQL (${pg_host}:${pg_port}/${pg_db})..."
+
+    if ! PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" \
+           -c "SELECT 1" &>/dev/null; then
+        error "Не удается подключиться к базе данных ${pg_db} на ${pg_host}"
         exit 1
     fi
-    
+
     info "PostgreSQL работает корректно"
 }
 
@@ -309,7 +313,7 @@ main() {
     
     check_dependencies
     setup_env_files
-    start_postgres
+    wait_and_setup_postgres
     check_postgres
     run_migrations
     start_backend
