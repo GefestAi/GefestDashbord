@@ -165,8 +165,15 @@ setup_env_files() {
     fi
     
     # Устанавливаем CORS_ORIGINS
-    if ! grep -q "^CORS_ORIGINS=.*localhost:3000" "$SCRIPT_DIR/backend/.env"; then
-        sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000|" "$SCRIPT_DIR/backend/.env"
+    local extra_origins=""
+    if [ -n "${BOT_DOMAIN:-}" ]; then
+        extra_origins=",https://${BOT_DOMAIN},http://${BOT_DOMAIN}"
+    fi
+    local cors_value="http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000${extra_origins}"
+    if grep -q "^CORS_ORIGINS=" "$SCRIPT_DIR/backend/.env"; then
+        sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=${cors_value}|" "$SCRIPT_DIR/backend/.env"
+    else
+        echo "CORS_ORIGINS=${cors_value}" >> "$SCRIPT_DIR/backend/.env"
     fi
 
     # Устанавливаем DATABASE_URL из переменных окружения контейнера
@@ -183,57 +190,25 @@ setup_env_files() {
     fi
 }
 
-# Ожидание и подготовка внешнего PostgreSQL
-wait_and_setup_postgres() {
+# Создание базы данных если не существует
+create_database() {
     local pg_host="${POSTGRES_HOST:-postgres}"
     local pg_user="${POSTGRES_USER:-postgres}"
     local pg_pass="${POSTGRES_PASSWORD:-postgres}"
     local pg_port="${POSTGRES_PORT:-5432}"
     local pg_db="${POSTGRES_DB:-mission_control}"
 
-    info "Ожидание PostgreSQL на ${pg_host}:${pg_port}..."
+    info "Проверка базы данных '${pg_db}'..."
 
-    for i in {1..30}; do
-        if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -c "SELECT 1" &>/dev/null; then
-            info "PostgreSQL доступен"
-            break
-        fi
-        if [ "$i" -eq 30 ]; then
-            error "PostgreSQL не отвечает после 30 попыток"
-            exit 1
-        fi
-        sleep 2
-    done
-
-    # Создаём базу данных если не существует
-    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" \
-           -lqt | cut -d'|' -f1 | grep -qw "$pg_db"; then
-        info "База данных ${pg_db} уже существует"
+    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres \
+        -tc "SELECT 1 FROM pg_database WHERE datname = '${pg_db}'" | grep -q 1; then
+        info "База данных '${pg_db}' уже существует"
     else
-        info "Создание базы данных ${pg_db}..."
-        PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" \
+        info "Создание базы данных '${pg_db}'..."
+        PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres \
             -c "CREATE DATABASE \"${pg_db}\";"
-        info "База данных создана"
+        info "База данных '${pg_db}' создана"
     fi
-}
-
-# Проверка PostgreSQL
-check_postgres() {
-    local pg_host="${POSTGRES_HOST:-postgres}"
-    local pg_user="${POSTGRES_USER:-postgres}"
-    local pg_pass="${POSTGRES_PASSWORD:-postgres}"
-    local pg_port="${POSTGRES_PORT:-5432}"
-    local pg_db="${POSTGRES_DB:-mission_control}"
-
-    info "Проверка подключения к PostgreSQL (${pg_host}:${pg_port}/${pg_db})..."
-
-    if ! PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_db" \
-           -c "SELECT 1" &>/dev/null; then
-        error "Не удается подключиться к базе данных ${pg_db} на ${pg_host}"
-        exit 1
-    fi
-
-    info "PostgreSQL работает корректно"
 }
 
 # Применение миграций
@@ -299,9 +274,6 @@ cleanup() {
         fi
         rm -f "$SCRIPT_DIR/.frontend.pid"
     fi
-    parse_args "$@"
-    
-    
     exit 0
 }
 
@@ -313,8 +285,7 @@ main() {
     
     check_dependencies
     setup_env_files
-    wait_and_setup_postgres
-    check_postgres
+    create_database
     run_migrations
     start_backend
     start_frontend
